@@ -1,120 +1,138 @@
-# VisionVoice — MVP (Free Stack)
+# 👁️ VisionVoice
 
-AI-powered accessibility app for blind and visually impaired users.
-**100% free APIs. No credit card required.**
+**An AI-powered, fully voice-controlled accessibility app for blind and low-vision users.**
 
----
+VisionVoice is a hands-free mobile assistant built for one core idea: most accessibility apps make their *output* accessible — spoken descriptions, audio readouts — but still assume the user can see the screen to operate them. VisionVoice makes the *input* voice-first too. One mic button drives the entire app: switching screens, capturing photos, searching memory, recording notes, exporting Braille, and navigating — all without ever requiring sight to operate.
 
-## ⚡ Setup (< 1 hour to running on your phone)
-
-### Step 1 — Get 2 free API keys (takes ~5 minutes total)
-
-**Groq** (for voice + chat — fastest free AI available):
-1. Go to https://console.groq.com
-2. Sign up (free, no credit card)
-3. Click **API Keys** → **Create API Key** → copy it
-
-**OpenRouter** (for camera vision features — free models):
-1. Go to https://openrouter.ai
-2. Sign up (free, no credit card)
-3. Click **Keys** → **Create Key** → copy it
-4. Free models cost $0 — no credits needed
+Built as a hackathon MVP. 100% free-tier AI infrastructure. No paid APIs, no subscriptions, no credit card required to run.
 
 ---
 
-### Step 2 — Install Expo Go on your phone
-- iOS: https://apps.apple.com/app/expo-go/id982107779
-- Android: https://play.google.com/store/apps/details?id=host.exp.exponent
+## ✨ Core Idea
+
+> Every other app tells a blind user what it sees. VisionVoice is controlled entirely by voice — one button, every screen, zero screen-time required to operate it.
 
 ---
 
-### Step 3 — Create project and copy files
+## 🚀 Features
+
+### 🎙️ One-Button, Hands-Free Control
+Every screen, every feature, every mode is reachable through a single global mic control. Voice commands route navigation, trigger camera capture, switch modes, search logs, and export files — no need to locate icons, tabs, or menus by touch.
+
+### 🗣️ Conversational AI Assistant
+Tap and talk. Transcribed via Groq Whisper, answered via a Groq-hosted LLM, and read back aloud — a natural conversation, not a command-only interface.
+
+### 👁️ Camera Vision Modes
+Point the camera and get a short, natural spoken answer — not a list of labels.
+- **Scene** — describes what's in front of you in plain spoken sentences
+- **Object** — identifies items held up to the camera
+- **Text** — reads visible text aloud
+- **Money** — identifies currency and denomination directly (e.g. *"A note of 100 Rupees"*)
+
+All vision responses are capped to a short, natural spoken length — built around the principle that blind users need the answer, not an inventory of visual properties.
+
+### 🧭 Voice-Guided Navigation
+Triple-tap anywhere on the Navigation screen and speak a destination. Routes are calculated using a fully free, no-API-key routing stack, with live turn-by-turn spoken cues and haptic confirmation at each step — no visual map required to operate it.
+
+### 🧠 Memory Log
+Every camera scan is automatically logged with date, time, and content. Ask later — *"What did I see in the kitchen?"* — and VisionVoice searches and reads the match back aloud. Entries can be deleted directly from the log.
+
+### 📚 Learn Screen — Voice Notes & Braille Export
+Speak a note, and it's automatically organized and saved. Export any note directly to a Braille-ready (.brf) file and share it — triggerable entirely by voice, no need to locate a tiny share icon by touch.
+
+### 📳 Semantic Haptic & Audio Feedback
+Every state change, error, and action is paired with both haptic and spoken feedback — no information in the app is conveyed by color or visual cue alone.
+
+---
+
+## 🛠️ Tech Stack
+
+- **Framework:** React Native + Expo SDK 54 (Expo Go compatible — no EAS build, no custom dev client, no native modules requiring compilation)
+- **Navigation:** React Navigation (bottom tabs)
+- **Voice/Audio:** `expo-speech` (text-to-speech), `expo-audio` (recording)
+- **Camera:** `expo-camera`
+- **Haptics:** `expo-haptics`
+- **File handling:** `expo-file-system`
+
+### AI Providers (free tier only)
+| Purpose | Provider | Model |
+|---|---|---|
+| Conversational chat | Groq | `openai/gpt-oss-120b` |
+| Speech-to-text | Groq | `whisper-large-v3` |
+| Lightweight tasks (memory logs, study notes) | Groq | `openai/gpt-oss-20b` |
+| Vision (scene/object/text/currency) | OpenRouter | `meta-llama/llama-3.2-11b-vision-instruct` |
+
+No OpenAI. No Anthropic API. No Google AI. No paid tier of anything.
+
+### Navigation / Routing Stack (free, no API key required)
+| Step | Service |
+|---|---|
+| Geocoding | Geoapify → Nominatim (fallback) |
+| Route calculation | OpenRouteService → OSRM (fallback) |
+
+No Google Maps API key — none needed, none planned.
+
+---
+
+## 📱 Setup
+
+### Prerequisites
+- Node.js installed
+- [Expo Go](https://expo.dev/go) installed on a physical Android/iOS device
+- Free API keys from [Groq Console](https://console.groq.com) and [OpenRouter](https://openrouter.ai) (no credit card required for either)
+
+### Install
 
 ```bash
-npx create-expo-app VisionVoice --template blank
-cd VisionVoice
-```
-Copy all files from this zip into the `VisionVoice/` folder.
-
----
-
-### Step 4 — Install dependencies
-
-```bash
-npx expo install expo-camera expo-av expo-haptics expo-speech expo-file-system
-npx expo install react-native-safe-area-context react-native-screens
-npm install @react-navigation/native @react-navigation/bottom-tabs
+git clone https://github.com/<your-username>/visionvoice.git
+cd visionvoice
+npm install
 ```
 
----
+### Configure environment variables
 
-### Step 5 — Add your keys
+Create a `.env` file in the project root:
 
-```bash
-cp .env.example .env
-```
-
-Open `.env` and paste your Groq and OpenRouter keys.
-
----
-
-### Step 6 — Run it
+### Run
 
 ```bash
 npx expo start
 ```
 
-Scan the QR code with Expo Go on your phone → live in 30 seconds.
+Scan the QR code with Expo Go on your phone.
+
+> ⚠️ **Note:** Groq periodically deprecates older free-tier model IDs. If you hit a `400: not a valid model ID` error, check [Groq's deprecations page](https://console.groq.com/docs/deprecations) and update the model strings in `services/ai.js`.
 
 ---
 
-## 🏗️ What's Built
+## ♿ Accessibility Standards
 
-| Feature | API Used | Cost |
-|---|---|---|
-| 🎙️ Voice → Text (Whisper) | Groq | Free |
-| 🤖 AI Assistant (Llama 3.3 70B) | Groq | Free |
-| 🔊 Text → Speech | expo-speech (device built-in) | Free |
-| 👁️ Scene Description | OpenRouter (Llama Vision) | Free |
-| 📄 Text Reader | OpenRouter (Llama Vision) | Free |
-| 📦 Object Identification | OpenRouter (Llama Vision) | Free |
-| 💵 Currency Detection | OpenRouter (Llama Vision) | Free |
-| 📳 Haptic Patterns (10 types) | expo-haptics (device built-in) | Free |
-
-**Total monthly cost: $0**
+Every screen in VisionVoice is built against a fixed set of constraints, not as an afterthought:
+- Minimum 60px touch targets on all interactive elements
+- Minimum 16–18px body text, 13px minimum for labels
+- Full `accessible` / `accessibilityLabel` / `accessibilityHint` coverage on every touchable element
+- No information conveyed by color alone — every visual cue is paired with haptic and/or spoken feedback
+- Dark theme by default, with a light mode toggle available
 
 ---
 
-## 📊 Free Tier Rate Limits
+## 🗺️ Roadmap
 
-| Service | Limit | Enough for? |
-|---|---|---|
-| Groq chat | 30 req/min, 14,400/day | ~200 voice queries/day |
-| Groq Whisper | 20 req/min, 2,000/day | ~2,000 recordings/day |
-| OpenRouter free | Varies by model | Light to moderate use |
-
----
-
-## 📁 Project Structure
-
-```
-VisionVoice/
-├── App.js                    # Navigation
-├── screens/
-│   ├── HomeScreen.js         # AI Voice Assistant
-│   ├── CameraScreen.js       # Scene / Text / Object / Currency
-│   └── SettingsScreen.js     # Haptics tester + speech speed
-└── services/
-    ├── ai.js                 # Groq + OpenRouter (zero OpenAI)
-    └── haptics.js            # 10 haptic patterns
-```
+Features explored in planning but not yet shipped in this MVP:
+- Fall detection with automatic emergency alerts (accelerometer-based, in progress)
+- Kitchen Guardian (cooking safety and doneness detection)
+- Social Turn-Taking Decoder (conversation attention detection)
+- Echolocation training mode
+- Persistent world-state memory across sessions (room-level change detection)
 
 ---
 
-## 🗺️ What's Next (Phase 2)
+## 📄 License
 
-- [ ] SOS emergency button
-- [ ] Safe Walk Mode (continuous narration)
-- [ ] Braille text converter
-- [ ] Volunteer video call network
-- [ ] Community accessibility map
+[Add your license here — e.g. MIT]
+
+---
+
+## 🙏 Acknowledgments
+
+Built for HACKVERSE as an accessibility-first MVP. Powered entirely by free-tier infrastructure from Groq and OpenRouter.
