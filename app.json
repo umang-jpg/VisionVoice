@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "VisionVoice",
+    "slug": "vision-voice",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0A0A0A"
+    },
+    "ios": {
+      "bundleIdentifier": "com.yourname.visionvoice",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Used to describe scenes for visually impaired users",
+        "NSMicrophoneUsageDescription": "Used for voice commands to control the app",
+        "NSLocationWhenInUseUsageDescription": "Used to include your location in emergency SOS messages when a fall is detected"
+      }
+    },
+    "android": {
+      "package": "com.yourname.visionvoice",
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow VisionVoice to access your camera to describe scenes."
+        }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow VisionVoice to use your microphone for voice commands."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow VisionVoice to use your location for emergency SOS messages."
+        }
+      ],
+      "expo-audio",
+      "expo-font"
+    ]
+  }
+}
