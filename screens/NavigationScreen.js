@@ -139,6 +139,7 @@ export default function NavigationScreen() {
   const [totalSteps, setTotalSteps] = useState(0);
   const [userPosition, setUserPosition] = useState(null);
   const [cueFlashActive, setCueFlashActive] = useState(false);
+  const [gpsLost, setGpsLost] = useState(false);
 
   const cueFlashTimerRef = useRef(null);
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -178,6 +179,7 @@ export default function NavigationScreen() {
     setTotalSteps(0);
     setUserPosition(null);
     setCueFlashActive(false);
+    setGpsLost(false);
     if (cueFlashTimerRef.current) {
       clearTimeout(cueFlashTimerRef.current);
       cueFlashTimerRef.current = null;
@@ -224,6 +226,8 @@ export default function NavigationScreen() {
           setDistanceToNextTurn(dist);
           setTotalSteps(stepsTotal);
           if (position) setUserPosition(position);
+          // GPS updates are flowing — clear any lost-signal indicator
+          setGpsLost(false);
         },
         onCue: (step, isRepeat) => {
           const prefix = isRepeat ? 'Reminder. ' : '';
@@ -239,6 +243,17 @@ export default function NavigationScreen() {
             speak('Location permission is required for turn-by-turn navigation.');
             if (hapticEnabled) playHapticPattern('error');
             resetToIdle();
+          } else if (code === 'location_unavailable') {
+            speak('I could not get your current location. Please make sure GPS is enabled and try again.');
+            if (hapticEnabled) playHapticPattern('error');
+            resetToIdle();
+          } else if (code === 'gps_lost') {
+            speak('I lost your GPS signal. Navigation will continue once it is back.');
+            if (hapticEnabled) playHapticPattern('warning');
+            setGpsLost(true);
+            // Do NOT call resetToIdle() here — gps_lost is recoverable mid-walk.
+            // The tracker keeps retrying internally; only location_denied and
+            // location_unavailable end the session.
           }
         },
       });
@@ -333,24 +348,49 @@ export default function NavigationScreen() {
   const startDestinationRecording = useCallback(async () => {
     if (isRecordingRef.current || status === 'navigating' || status === 'routing') return;
 
-    try {
-      await AudioModule.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
-      await recorder.prepareToRecordAsync();
-      recorder.record();
-      isRecordingRef.current = true;
-      setNavStatus('listening', 'Listening…');
-      if (hapticEnabled) playHapticPattern('start');
-      speak('Where do you want to go?');
-    } catch (err) {
-      console.warn('Start navigation recording failed:', err);
-      speak('Could not start recording. Check microphone permission.');
-      if (hapticEnabled) playHapticPattern('error');
-      setNavStatus('idle', 'Ready');
-    }
-  }, [hapticEnabled, recorder, setNavStatus, speak, status]);
+    setNavStatus('listening', 'Listening…');
+    if (hapticEnabled) playHapticPattern('start');
+    Speech.stop();
+    Speech.speak('Where do you want to go?', {
+      rate: speechRate,
+      onDone: async () => {
+        try {
+          await AudioModule.setAudioModeAsync({
+            allowsRecordingIOS: true,
+            playsInSilentModeIOS: true,
+          });
+          await recorder.prepareToRecordAsync();
+          recorder.record();
+          isRecordingRef.current = true;
+        } catch (err) {
+          console.warn('Start navigation recording failed:', err);
+          speak('Could not start recording. Check microphone permission.');
+          if (hapticEnabled) playHapticPattern('error');
+          setNavStatus('idle', 'Ready');
+        }
+      },
+      onError: () => {
+        // If TTS itself fails, do not leave the user stuck in "Listening…"
+        // with no mic ever started — fall back to starting the recording
+        // anyway so the feature still works.
+        (async () => {
+          try {
+            await AudioModule.setAudioModeAsync({
+              allowsRecordingIOS: true,
+              playsInSilentModeIOS: true,
+            });
+            await recorder.prepareToRecordAsync();
+            recorder.record();
+            isRecordingRef.current = true;
+          } catch (err) {
+            console.warn('Start navigation recording failed after TTS error:', err);
+            if (hapticEnabled) playHapticPattern('error');
+            setNavStatus('idle', 'Ready');
+          }
+        })();
+      },
+    });
+  }, [hapticEnabled, recorder, setNavStatus, speechRate, status]);
 
   const handleTripleTap = useCallback(() => {
     const now = Date.now();
@@ -421,6 +461,11 @@ export default function NavigationScreen() {
     badgeColor = theme.semantic.success;
     badgeIcon = isNavigating ? 'navigation' : 'loader';
   }
+  // GPS lost mid-navigation — override badge to warn without killing the route
+  if (gpsLost && isNavigating) {
+    badgeColor = theme.semantic.neutral;
+    badgeIcon = 'wifi-off';
+  }
 
   const statusBorderColor = cueFlashActive ? theme.semantic.neutral : theme.border;
 
@@ -468,9 +513,11 @@ export default function NavigationScreen() {
                 ? 'Listening for destination'
                 : isBusy
                   ? 'Processing destination'
-                  : isNavigating
-                    ? 'Navigation in progress'
-                    : 'Ready to set destination'
+                  : gpsLost && isNavigating
+                    ? 'GPS signal lost, waiting to recover'
+                    : isNavigating
+                      ? 'Navigation in progress'
+                      : 'Ready to set destination'
             }
           >
             {isBusy ? (

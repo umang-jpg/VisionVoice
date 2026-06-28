@@ -119,6 +119,26 @@ export const HAPTIC_PATTERNS = {
     },
   },
 
+  navigationStraight: {
+    label: 'Continue Straight',
+    description: 'Silent — calm/neutral path continues ahead (no haptic per design language)',
+    play: async () => {
+      // Intentional no-op. Per the app's color-haptic-audio semantic system,
+      // silence = calm/neutral. Straight continuation requires no feedback.
+    },
+  },
+
+  navigationUturn: {
+    label: 'Turn Around',
+    description: 'Three quick heavy taps — U-turn required',
+    play: async () => {
+      for (let i = 0; i < 3; i++) {
+        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        if (i < 2) await delay(100);
+      }
+    },
+  },
+
   // ── Emergency ─────────────────────────────────────────────────
   sos: {
     label: 'SOS',
@@ -160,7 +180,7 @@ export const HAPTIC_PATTERNS = {
 
 /**
  * Play a haptic pattern by key
- * @param {'start'|'stop'|'response'|'error'|'message'|'warning'|'navigationTurn'|'navigationArrived'|'sos'|'hazard'} key
+ * @param {'start'|'stop'|'response'|'error'|'message'|'warning'|'navigationTurn'|'navigationStraight'|'navigationArrived'|'navigationUturn'|'navTurnLeft'|'navTurnRight'|'navContinue'|'sos'|'hazard'} key
  */
 export async function playHapticPattern(key) {
   const pattern = HAPTIC_PATTERNS[key];

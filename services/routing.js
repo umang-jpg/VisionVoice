@@ -1,774 +1,662 @@
+// services/routing.js
+//
+// Free-only routing stack with fallback:
+//   Geocode: Geoapify -> Nominatim
+//   Route:   ORS      -> OSRM
+//
+// HARD RULES honored here:
+//   - No paid/credit-card APIs.
+//   - No npm deps beyond expo-location (already required by locationService).
+//     All geometry (haversine distance, bearing, geojson line-string handling)
+//     is implemented inline as plain JS.
+//   - Every fetch is timeout-bounded via AbortController (~8s).
+//   - No function throws out to the caller; failures resolve RouteError.
+
+// -----------------------------
+// Low-level fetch helper
+// -----------------------------
+
+const DEFAULT_TIMEOUT_MS = 8000;
+
 /**
- * Walking route + geocoding via Google Maps Platform.
- * Optional fallback providers remain available if Google keys are missing.
+ * Wrapped fetch with timeout. Never throws — returns {ok:true,status,json}
+ * or {ok:false}. JSON parse failures count as failures.
  */
-
-import * as Location from 'expo-location';
-
-const GOOGLE_PLACES_BASE = 'https://places.googleapis.com/v1';
-const GOOGLE_DIRECTIONS_BASE = 'https://maps.googleapis.com/maps/api/directions/json';
-const GEOAPIFY_BASE = 'https://api.geoapify.com';
-const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
-const OSRM_BASE =
-  process.env.EXPO_PUBLIC_OSRM_BASE_URL || 'https://router.project-osrm.org';
-const GOOGLE_MAPS_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || null;
-const GEOAPIFY_API_KEY = process.env.EXPO_PUBLIC_GEOAPIFY_API_KEY || null;
-const ORS_API_KEY = process.env.EXPO_PUBLIC_ORS_API_KEY || null;
-
-const USER_AGENT = 'VisionVoice/1.0 (accessibility navigation app)';
-const ORS_BASE = 'https://api.openrouteservice.org';
-
-const NEARBY_PREFIX_RE = /^(nearest|nearby|closest|local)\s+/i;
-const NEAR_ME_SUFFIX_RE = /\s+(near me|nearby|around me|close to me)$/i;
-const SEARCH_ALIASES = {
-  cafe: ['cafe', 'coffee shop', 'coffee'],
-  'coffee shop': ['coffee shop', 'cafe', 'coffee'],
-  coffee: ['coffee', 'coffee shop', 'cafe'],
-  restaurant: ['restaurant', 'food'],
-  atm: ['atm', 'bank atm'],
-  hospital: ['hospital', 'clinic'],
-  pharmacy: ['pharmacy', 'chemist'],
-  bus: ['bus stop', 'bus station'],
-  'bus stop': ['bus stop', 'bus station'],
-  train: ['train station', 'railway station'],
-  'train station': ['train station', 'railway station'],
-};
-
-function formatDistance(meters) {
-  if (meters < 1000) return `${Math.round(meters)} meters`;
-  return `${(meters / 1000).toFixed(1)} kilometers`;
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const status = res.status;
+    if (status < 200 || status >= 300) {
+      return { ok: false, status };
+    }
+    let json = null;
+    try {
+      json = await res.json();
+    } catch (_) {
+      return { ok: false, status };
+    }
+    return { ok: true, status, json };
+  } catch (_) {
+    return { ok: false };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-function formatDuration(seconds) {
-  const mins = Math.max(1, Math.round(seconds / 60));
-  return mins === 1 ? '1 minute' : `${mins} minutes`;
+// -----------------------------
+// Inline geometry helpers
+// (No turf / geolib — manual implementations, good enough at city-walk scale.)
+// -----------------------------
+
+function toRad(deg) {
+  return (deg * Math.PI) / 180;
+}
+function toDeg(rad) {
+  return (rad * 180) / Math.PI;
 }
 
+/** Haversine distance in meters between {lat,lon}. */
 function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
-  const toRad = (d) => (d * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
-function buildViewbox(origin, radiusDegrees = 0.08) {
-  return [
-    origin.longitude - radiusDegrees,
-    origin.latitude + radiusDegrees,
-    origin.longitude + radiusDegrees,
-    origin.latitude - radiusDegrees,
-  ].join(',');
+/** Initial bearing in degrees (0=N, 90=E) from point1 -> point2. */
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.cos(toRad(lon2 - lon1));
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
-function normalizeDestinationQuery(query) {
-  return query
-    .trim()
-    .replace(/[.,!?]+$/g, '')
-    .replace(NEARBY_PREFIX_RE, '')
-    .replace(NEAR_ME_SUFFIX_RE, '')
-    .trim();
-}
-
-function buildSearchQueries(query) {
-  const normalized = normalizeDestinationQuery(query);
-  const variants = [query.trim(), normalized].filter(Boolean);
-  const aliases = SEARCH_ALIASES[normalized.toLowerCase()];
-  if (aliases) variants.push(...aliases);
-  if (normalized && !/india/i.test(normalized)) {
-    variants.push(`${normalized}, India`);
-    variants.push(`${normalized} India`);
-  }
-  return [...new Set(variants.map((item) => item.trim()).filter(Boolean))];
-}
-
-function buildGoogleLocationBias(origin, radiusMeters = 30000) {
-  if (!origin) return null;
-  return {
-    circle: {
-      center: {
-        latitude: origin.latitude,
-        longitude: origin.longitude,
-      },
-      radius: radiusMeters,
-    },
-  };
-}
-
-function simplifyStepInstruction(text) {
-  if (!text) return 'Continue straight';
-
-  return String(text)
-    .replace(/\s+/g, ' ')
-    .replace(/\u00a0/g, ' ')
-    .replace(/^(Head|Proceed|Continue) /i, 'Continue ')
-    .replace(/^Merge onto /i, 'Merge onto ')
-    .replace(/^Turn left /i, 'Turn left ')
-    .replace(/^Turn right /i, 'Turn right ')
-    .trim();
-}
-
-function buildRouteFromGoogleDirections(data, destination) {
-  const route = data.routes?.[0];
-  const leg = route?.legs?.[0];
-  if (!leg?.steps?.length) return null;
-
-  const steps = leg.steps
-    .map((step) => {
-      const maneuver = mapManeuver(step.maneuver || '', step.html_instructions || step.instructions || '');
-      const instruction = step.html_instructions
-        ? step.html_instructions.replace(/<[^>]+>/g, ' ')
-        : step.instructions || step.maneuver || maneuver.spokenCue;
-      const spokenCue = simplifyStepInstruction(instruction);
-      return {
-        instruction: spokenCue,
-        spokenCue,
-        maneuverType: maneuver.maneuverType,
-        hapticKey: maneuver.hapticKey,
-        latitude: step.end_location?.lat ?? destination.latitude,
-        longitude: step.end_location?.lng ?? destination.longitude,
-        distanceMeters: step.distance?.value || 0,
-      };
-    })
-    .filter((step) => step.instruction && step.spokenCue);
-
-  if (!steps.length) return null;
-
-  const last = steps[steps.length - 1];
-  if (last.maneuverType !== 'arrive') {
-    steps.push({
-      instruction: 'Arrive',
-      spokenCue: 'You have arrived',
-      maneuverType: 'arrive',
-      hapticKey: 'navigationArrived',
-      latitude: destination.latitude,
-      longitude: destination.longitude,
-      distanceMeters: 0,
-    });
-  }
-
-  return {
-    steps: compressRouteSteps(steps),
-    totalDistanceMeters: route.legs?.[0]?.distance || 0,
-    totalDurationSeconds: route.legs?.[0]?.duration || 0,
-  };
-}
-
-function compressRouteSteps(steps) {
-  const compressed = [];
-
-  for (const step of steps) {
-    const last = compressed[compressed.length - 1];
-    if (
-      last &&
-      last.maneuverType === step.maneuverType &&
-      last.instruction === step.instruction &&
-      Math.abs((last.distanceMeters || 0) - (step.distanceMeters || 0)) < 20
-    ) {
-      last.distanceMeters += step.distanceMeters || 0;
-      continue;
-    }
-
-    compressed.push({ ...step });
-  }
-
-  return compressed;
-}
-
-function sortPlacesByDistance(places, origin, getLatitude, getLongitude) {
-  if (!origin) return places;
-
-  return [...places].sort(
-    (a, b) =>
-      haversineMeters(origin.latitude, origin.longitude, getLatitude(a), getLongitude(a)) -
-      haversineMeters(origin.latitude, origin.longitude, getLatitude(b), getLongitude(b))
-  );
-}
-
-function mapManeuver(type, modifier) {
-  const t = (type || '').toLowerCase();
-  const m = (modifier || '').toLowerCase();
-
-  if (t === 'arrive') {
-    return { maneuverType: 'arrive', hapticKey: 'navigationArrived', spokenCue: 'You have arrived' };
-  }
-  if (m === 'left' || m === 'sharp left' || m === 'slight left') {
-    return { maneuverType: 'left', hapticKey: 'navTurnLeft', spokenCue: 'Turn left now' };
-  }
-  if (m === 'right' || m === 'sharp right' || m === 'slight right') {
-    return { maneuverType: 'right', hapticKey: 'navTurnRight', spokenCue: 'Turn right now' };
-  }
-  if (t === 'turn' || t === 'continue' || t === 'new name' || m === 'straight') {
-    return { maneuverType: 'straight', hapticKey: 'navContinue', spokenCue: 'Continue straight' };
-  }
-  return { maneuverType: 'other', hapticKey: 'navigationTurn', spokenCue: 'Follow the path ahead' };
-}
-
-function buildSpokenCue(maneuver, streetName) {
-  const base = maneuver.spokenCue;
-  if (streetName && streetName.length > 1) {
-    if (maneuver.maneuverType === 'arrive') return base;
-    return `${base} onto ${streetName}`;
-  }
-  return base;
-}
-
-async function searchNominatim(query, origin, bounded) {
-  const params = new URLSearchParams({
-    format: 'json',
-    limit: '5',
-    addressdetails: '0',
-    q: query,
-  });
-
-  if (origin) {
-    params.set('viewbox', buildViewbox(origin));
-    if (bounded) params.set('bounded', '1');
-  }
-
-  const url = `${NOMINATIM_BASE}/search?${params.toString()}`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Geocoding failed (${res.status})`);
-  }
-
-  return await res.json();
-}
-
-async function searchGooglePlaces(query, origin) {
-  if (!GOOGLE_MAPS_API_KEY) return [];
-
-  const body = {
-    textQuery: query,
-  };
-
-  const locationBias = buildGoogleLocationBias(origin);
-  if (locationBias) body.locationBias = locationBias;
-
-  const res = await fetch(`${GOOGLE_PLACES_BASE}/places:searchText`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Google Places failed (${res.status})`);
-  }
-
-  const data = await res.json();
-  return data?.places || [];
-}
-
-async function geocodeWithGoogle(query, origin) {
-  if (!GOOGLE_MAPS_API_KEY) return null;
-
-  const searchQueries = buildSearchQueries(query);
-
-  for (const searchQuery of searchQueries) {
-    const places = await searchGooglePlaces(searchQuery, origin);
-    if (!places?.length) continue;
-
-    const sorted = sortPlacesByDistance(
-      places,
-      origin,
-      (place) => place.location?.latitude,
-      (place) => place.location?.longitude
-    );
-
-    const place = sorted[0];
-    const name =
-      place.displayName?.text ||
-      place.formattedAddress?.split(',')?.[0] ||
-      searchQuery;
-
-    return {
-      name,
-      googlePlaceId: place.id || null,
-      latitude: place.location?.latitude,
-      longitude: place.location?.longitude,
-      provider: 'google',
-    };
-  }
-
-  return null;
-}
-
-async function searchGeoapify(query, origin) {
-  if (!GEOAPIFY_API_KEY) return [];
-
-  const params = new URLSearchParams({
-    text: query,
-    format: 'json',
-    limit: '5',
-    apiKey: GEOAPIFY_API_KEY,
-  });
-
-  if (origin) {
-    params.set('bias', `proximity:${origin.longitude},${origin.latitude}`);
-  }
-  params.set('filter', 'countrycode:in');
-
-  const url = `${GEOAPIFY_BASE}/v1/geocode/search?${params.toString()}`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
-
-  if (!res.ok) {
-    throw new Error(`Geoapify geocoding failed (${res.status})`);
-  }
-
-  const data = await res.json();
-  return data?.results || [];
-}
-
-async function geocodeWithGeoapify(query, origin) {
-  if (!GEOAPIFY_API_KEY) return null;
-
-  const searchQueries = buildSearchQueries(query);
-
-  for (const searchQuery of searchQueries) {
-    for (const useOrigin of origin ? [true, false] : [false]) {
-      const data = await searchGeoapify(searchQuery, useOrigin ? origin : null);
-      if (!data?.length) continue;
-
-      const sorted = sortPlacesByDistance(
-        data,
-        origin,
-        (place) => parseFloat(place.lat),
-        (place) => parseFloat(place.lon)
-      );
-      const place = sorted[0];
-      const name = place.name || place.address_line1 || place.formatted || searchQuery;
-
-      return {
-        name,
-        latitude: parseFloat(place.lat),
-        longitude: parseFloat(place.lon),
-        provider: 'geoapify',
-      };
-    }
-  }
-
-  return null;
-}
-
-async function geocodeWithNominatim(query, origin) {
-  const searchQueries = buildSearchQueries(query);
-
-  for (const searchQuery of searchQueries) {
-    const attempts = origin
-      ? [{ bounded: true }, { bounded: false }]
-      : [{ bounded: false }];
-
-    for (const attempt of attempts) {
-      const data = await searchNominatim(searchQuery, origin, attempt.bounded);
-      if (!data?.length) continue;
-
-      const sorted = sortPlacesByDistance(
-        data,
-        origin,
-        (place) => parseFloat(place.lat),
-        (place) => parseFloat(place.lon)
-      );
-
-      const place = sorted[0];
-      return {
-        name: place.display_name?.split(',')[0] || searchQuery,
-        latitude: parseFloat(place.lat),
-        longitude: parseFloat(place.lon),
-        provider: 'nominatim',
-      };
-    }
-  }
-
-  return null;
-}
-
-async function getOriginCoordinates() {
-  const { status } = await Location.getForegroundPermissionsAsync();
-  if (status !== 'granted') {
-    const granted = await Location.requestForegroundPermissionsAsync();
-    if (granted.status !== 'granted') return null;
-  }
-
-  const position = await Location.getCurrentPositionAsync({
-    accuracy: Location.Accuracy.Balanced,
-  });
-
-  return {
-    latitude: position.coords.latitude,
-    longitude: position.coords.longitude,
-  };
-}
-
-async function fetchRouteFromOsrm(origin, destination) {
-  const coords = `${origin.longitude},${origin.latitude};${destination.longitude},${destination.latitude}`;
-  const url =
-    `${OSRM_BASE}/route/v1/foot/${coords}?steps=true&overview=full&geometries=geojson`;
-
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!res.ok) throw new Error(`Routing failed (${res.status})`);
-
-  const data = await res.json();
-  if (data.code !== 'Ok' || !data.routes?.length) return null;
-
-  const route = data.routes[0];
-  const leg = route.legs?.[0];
-  if (!leg?.steps?.length) return null;
-
-  const steps = leg.steps
-    .filter((step) => step.maneuver)
-    .map((step) => {
-      const [lon, lat] = step.maneuver.location;
-      const maneuver = mapManeuver(step.maneuver.type, step.maneuver.modifier);
-      return {
-        instruction: step.name || maneuver.spokenCue,
-        spokenCue: buildSpokenCue(maneuver, step.name),
-        maneuverType: maneuver.maneuverType,
-        hapticKey: maneuver.hapticKey,
-        latitude: lat,
-        longitude: lon,
-        distanceMeters: step.distance || 0,
-      };
-    });
-
-  if (!steps.length) return null;
-
-  const last = steps[steps.length - 1];
-  if (last.maneuverType !== 'arrive') {
-    steps.push({
-      instruction: 'Arrive',
-      spokenCue: 'You have arrived',
-      maneuverType: 'arrive',
-      hapticKey: 'navigationArrived',
-      latitude: destination.latitude,
-      longitude: destination.longitude,
-      distanceMeters: 0,
-    });
-  }
-
-  return {
-    steps,
-    totalDistanceMeters: route.distance || leg.distance || 0,
-    totalDurationSeconds: route.duration || leg.duration || 0,
-  };
-}
-
-async function fetchRouteFromGoogleDirections(origin, destination) {
-  if (!GOOGLE_MAPS_API_KEY) return null;
-
-  const params = new URLSearchParams({
-    origin: `${origin.latitude},${origin.longitude}`,
-    destination: `${destination.latitude},${destination.longitude}`,
-    mode: 'walking',
-    alternatives: 'false',
-    units: 'metric',
-    key: GOOGLE_MAPS_API_KEY,
-  });
-
-  const res = await fetch(`${GOOGLE_DIRECTIONS_BASE}?${params.toString()}`, {
-    headers: { Accept: 'application/json' },
-  });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Google Directions failed (${res.status}): ${body}`);
-  }
-
-  const data = await res.json();
-  if (data.status !== 'OK' || !data.routes?.length) {
-    return null;
-  }
-
-  const route = data.routes[0];
-  const leg = route.legs?.[0];
-  if (!leg?.steps?.length) return null;
-
-  const steps = leg.steps
-    .map((step) => {
-      const maneuverText = step.maneuver || '';
-      const instructionText =
-        step.html_instructions?.replace(/<[^>]+>/g, ' ') ||
-        step.instructions ||
-        maneuverText ||
-        'Continue straight';
-
-      const maneuver = mapManeuver(maneuverText, instructionText);
-      const spokenCue = simplifyStepInstruction(instructionText);
-
-      return {
-        instruction: spokenCue,
-        spokenCue,
-        maneuverType: maneuver.maneuverType,
-        hapticKey: maneuver.hapticKey,
-        latitude: step.end_location?.lat ?? destination.latitude,
-        longitude: step.end_location?.lng ?? destination.longitude,
-        distanceMeters: step.distance?.value || 0,
-      };
-    })
-    .filter((step) => step.instruction);
-
-  if (!steps.length) return null;
-
-  return {
-    steps: compressRouteSteps(
-      steps.concat({
-        instruction: 'Arrive',
-        spokenCue: 'You have arrived',
-        maneuverType: 'arrive',
-        hapticKey: 'navigationArrived',
-        latitude: destination.latitude,
-        longitude: destination.longitude,
-        distanceMeters: 0,
-      })
-    ),
-    totalDistanceMeters: leg.distance || route.legs?.[0]?.distance || 0,
-    totalDurationSeconds: leg.duration || route.legs?.[0]?.duration || 0,
-  };
-}
-
-function mapOrsInstruction(type, instruction) {
-  const text = (instruction || '').toLowerCase();
-
-  if (type === 10 || type === 11 || text.includes('arrive')) {
-    return { maneuverType: 'arrive', hapticKey: 'navigationArrived', spokenCue: 'You have arrived' };
-  }
-  if (text.includes('left')) {
-    return { maneuverType: 'left', hapticKey: 'navTurnLeft', spokenCue: instruction || 'Turn left now' };
-  }
-  if (text.includes('right')) {
-    return { maneuverType: 'right', hapticKey: 'navTurnRight', spokenCue: instruction || 'Turn right now' };
-  }
-  if (text.includes('straight') || text.includes('continue')) {
-    return { maneuverType: 'straight', hapticKey: 'navContinue', spokenCue: instruction || 'Continue straight' };
-  }
-
-  return { maneuverType: 'other', hapticKey: 'navigationTurn', spokenCue: instruction || 'Follow the path ahead' };
-}
-
-function buildRouteFromOrsData(data, destination) {
-  const route = data.routes?.[0];
-  const segment = route?.segments?.[0];
-  const geometry = route?.geometry?.coordinates || route?.geometry || [];
-  if (!segment?.steps?.length) return null;
-
-  const steps = segment.steps.map((step) => {
-    const pointIndex = step.way_points?.[0] ?? 0;
-    const point = geometry[Math.min(pointIndex, geometry.length - 1)] || [
-      destination.longitude,
-      destination.latitude,
-    ];
-    const [lon, lat] = Array.isArray(point) ? point : [destination.longitude, destination.latitude];
-    const maneuver = mapOrsInstruction(step.type, step.instruction);
-    return {
-      instruction: step.instruction || maneuver.spokenCue,
-      spokenCue: maneuver.spokenCue,
-      maneuverType: maneuver.maneuverType,
-      hapticKey: maneuver.hapticKey,
-      latitude: lat,
-      longitude: lon,
-      distanceMeters: step.distance || 0,
-    };
-  });
-
-  const last = steps[steps.length - 1];
-  if (last?.maneuverType !== 'arrive') {
-    steps.push({
-      instruction: 'Arrive',
-      spokenCue: 'You have arrived',
-      maneuverType: 'arrive',
-      hapticKey: 'navigationArrived',
-      latitude: destination.latitude,
-      longitude: destination.longitude,
-      distanceMeters: 0,
-    });
-  }
-
-  return {
-    steps,
-    totalDistanceMeters: route.distance || segment.distance || 0,
-    totalDurationSeconds: route.duration || segment.duration || 0,
-  };
-}
-
-async function fetchRouteFromOpenRouteService(origin, destination) {
-  if (!ORS_API_KEY) return null;
-
-  const payload = {
-    coordinates: [
-      [origin.longitude, origin.latitude],
-      [destination.longitude, destination.latitude],
-    ],
-    instructions: true,
-  };
-
-  const attempts = [
-    {
-      name: 'bearer',
-      url: `${ORS_BASE}/v2/directions/foot-walking/json`,
-      headers: {
-        Authorization: `Bearer ${ORS_API_KEY}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-    },
-    {
-      name: 'raw-header',
-      url: `${ORS_BASE}/v2/directions/foot-walking/json`,
-      headers: {
-        Authorization: ORS_API_KEY,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-    },
-    {
-      name: 'query-key',
-      url: `${ORS_BASE}/v2/directions/foot-walking/json?api_key=${encodeURIComponent(ORS_API_KEY)}`,
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-    },
-  ];
-
-  let lastError = null;
-
-  for (const attempt of attempts) {
-    const res = await fetch(attempt.url, {
-      method: 'POST',
-      headers: attempt.headers,
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      lastError = new Error(`OpenRouteService routing failed (${attempt.name}, ${res.status}): ${body}`);
-      continue;
-    }
-
-    const data = await res.json();
-    const route = buildRouteFromOrsData(data, destination);
-    if (!route) return null;
-    return route;
-  }
-
-  throw lastError || new Error('OpenRouteService routing failed');
-}
+// -----------------------------
+// Maneuver normalization
+// -----------------------------
 
 /**
- * Fetch a walking route to a destination query string.
- * Works without API keys via Nominatim + OSRM public endpoints.
- * Uses Geoapify geocoding first when EXPO_PUBLIC_GEOAPIFY_API_KEY is set.
+ * Maps a provider maneuver (type + optional modifier/direction + step text)
+ * onto one of the five internal buckets. Falls back to bearing-delta analysis
+ * when the provider gives no directional signal.
  */
-export async function fetchWalkingRoute(destinationQuery) {
-  if (!destinationQuery?.trim()) {
-    return { ok: false, message: 'No destination provided. Please try again.' };
+function bucketFromManeuver({
+  type,
+  modifier,
+  direction,
+  instructionText,
+  prevCoord,
+  thisCoord,
+  nextCoord,
+}) {
+  const t = (type || '').toLowerCase();
+  const m = (modifier || direction || '').toLowerCase();
+
+  if (t === 'arrive' || t === 'destination' || t === 'end_of_road') {
+    if (t === 'arrive' || t === 'destination') return 'arrive';
   }
 
-  try {
-    const origin = await getOriginCoordinates();
-    if (!origin) {
-      return {
-        ok: false,
-        message: 'Location permission is required for navigation. Enable location in settings.',
-      };
+  if (t === 'turn' || t === 'new name' || t === 'merge' || t === 'on ramp' || t === 'off ramp' || t === 'end of road') {
+    if (m.includes('left')) return 'turn-left';
+    if (m.includes('right')) return 'turn-right';
+  }
+
+  if (t === 'continue' || t === 'depart' || t === 'merge') {
+    if (m.includes('left')) return 'turn-left';
+    if (m.includes('right')) return 'turn-right';
+    if (m === 'straight' || m === 'slight' || m === '' || m === 'uturn') {
+      if (m === 'uturn') return 'uturn';
+      return 'straight';
     }
+  }
 
-    let destination = null;
+  if (t === 'roundabout' || t === 'rotary' || t === 'roundabout turn') {
+    if (m.includes('left')) return 'turn-left';
+    if (m.includes('right')) return 'turn-right';
+    return 'straight';
+  }
 
+  if (t === 'uturn' || m === 'uturn' || m.includes('u-turn') || m.includes('uturn')) {
+    return 'uturn';
+  }
+
+  // Instruction-text heuristics (used when raw text is rich, e.g. OSRM 'name').
+  if (instructionText) {
+    const txt = instructionText.toLowerCase();
+    if (txt.includes('u-turn') || txt.includes('uturn') || txt.includes('turn around')) return 'uturn';
+    if (txt.includes('turn left') || txt.includes('bear left') || txt.includes('slight left') || txt.includes('sharp left')) return 'turn-left';
+    if (txt.includes('turn right') || txt.includes('bear right') || txt.includes('slight right') || txt.includes('sharp right')) return 'turn-right';
+    if (txt.includes('arriv') || txt.includes('destination') || txt.includes('you have reached')) return 'arrive';
+    if (txt.includes('continue') || txt.includes('straight') || txt.includes('head') || txt.includes('depart')) return 'straight';
+  }
+
+  // Bearing-delta fallback: infer turn direction from geometry.
+  if (prevCoord && thisCoord && nextCoord) {
     try {
-      destination = await geocodeWithGoogle(destinationQuery.trim(), origin);
-    } catch (err) {
-      console.warn('Google geocoding error:', err.message);
+      const b1 = bearingDeg(prevCoord[1], prevCoord[0], thisCoord[1], thisCoord[0]);
+      const b2 = bearingDeg(thisCoord[1], thisCoord[0], nextCoord[1], nextCoord[0]);
+      let delta = (b2 - b1 + 360) % 360;
+      if (delta > 180) delta -= 360; // -180..180
+      if (delta > 140 || delta < -140) return 'uturn';
+      if (delta > 30) return 'turn-right';
+      if (delta < -30) return 'turn-left';
+      return 'straight';
+    } catch (_) {
+      // ignore
     }
+  }
 
-    if (!destination) {
-      try {
-        destination = await geocodeWithGeoapify(destinationQuery.trim(), origin);
-      } catch (err) {
-        console.warn('Geoapify geocoding error:', err.message);
-      }
-    }
+  return 'straight';
+}
 
-    if (!destination) {
-      destination = await geocodeWithNominatim(destinationQuery.trim(), origin);
-    }
-
-    if (!destination) {
-      return {
-        ok: false,
-        message: `Could not find ${destinationQuery}. Please try a different place name.`,
-      };
-    }
-
-    let route = null;
-    let routingProvider = null;
-
-    if (GOOGLE_MAPS_API_KEY) {
-      try {
-        route = await fetchRouteFromGoogleDirections(origin, destination);
-        if (route) routingProvider = 'google';
-      } catch (err) {
-        console.warn('Google Directions error:', err.message);
-      }
-    }
-
-    if (!route && ORS_API_KEY) {
-      try {
-        route = await fetchRouteFromOpenRouteService(origin, destination);
-        if (route) routingProvider = 'ors';
-      } catch (err) {
-        console.warn('OpenRouteService routing error:', err.message);
-      }
-    }
-
-    if (!route && OSRM_BASE && OSRM_BASE !== 'https://router.project-osrm.org') {
-      try {
-        route = await fetchRouteFromOsrm(origin, destination);
-        if (route) routingProvider = 'osrm';
-      } catch (err) {
-        console.warn('OSRM routing error:', err.message);
-      }
-    }
-
-    if (!route) {
-      return {
-        ok: false,
-        message: 'No walking route found. Try a closer or clearer destination.',
-      };
-    }
-
-    console.warn(
-      `[routing] geocode=${destination.provider || 'unknown'} route=${routingProvider || 'unknown'} steps=${route.steps.length}`
-    );
-
-    return {
-      ok: true,
-      destinationName: destination.name,
-      destination,
-      origin,
-      steps: route.steps,
-      summaryDistance: formatDistance(route.totalDistanceMeters),
-      summaryDuration: formatDuration(route.totalDurationSeconds),
-      totalDistanceMeters: route.totalDistanceMeters,
-      totalDurationSeconds: route.totalDurationSeconds,
-    };
-  } catch (err) {
-    console.warn('fetchWalkingRoute error:', err);
-    return {
-      ok: false,
-      message: 'Navigation is unavailable right now. Check your connection and try again.',
-    };
+function bucketToHapticKey(bucket) {
+  switch (bucket) {
+    case 'turn-left':
+    case 'turn-right':
+      return 'navigationTurn';
+    case 'uturn':
+      // NOTE: 'navigationUturn' must be registered as a pattern key in
+      // services/haptics.js. If it is not, playHapticPattern() falls back to
+      // a generic selectionAsync() buzz (not broken, just weaker than
+      // intended) — confirm this key exists before wiring.
+      return 'navigationUturn';
+    case 'arrive':
+      return 'navigationArrived';
+    case 'straight':
+    default:
+      return 'navigationStraight';
   }
 }
 
-export { haversineMeters, formatDistance };
+function bucketToGenericSpoken(bucket) {
+  switch (bucket) {
+    case 'turn-left':
+      return 'Turn left';
+    case 'turn-right':
+      return 'Turn right';
+    case 'uturn':
+      return 'Turn around';
+    case 'arrive':
+      return 'You have arrived';
+    case 'straight':
+    default:
+      return 'Continue straight';
+  }
+}
+
+/** Returns the street name from a route name string. */
+function cleanName(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  return s;
+}
+
+// -----------------------------
+// ORS normalizer
+// -----------------------------
+
+function normalizeOrs(data) {
+  // data: GeoJSON FeatureCollection
+  if (!data || !data.features || !data.features.length) return null;
+  const feature = data.features[0];
+  const coords = feature?.geometry?.coordinates || [];
+  const segs = feature?.properties?.segments || [];
+  if (!segs.length) return null;
+  const seg = segs[0];
+  const rawSteps = seg.steps || [];
+
+  const steps = [];
+  // Build coordinate slice per step using way_points (indices into the geometry).
+  for (let i = 0; i < rawSteps.length; i++) {
+    const s = rawSteps[i];
+    const wp = s.way_points || [0, coords.length - 1];
+    const startIdx = Math.max(0, Math.min(wp[0] || 0, coords.length - 1));
+    const endIdx = Math.max(startIdx, Math.min(wp[1] || coords.length - 1, coords.length - 1));
+    const segCoords = coords.slice(startIdx, endIdx + 1);
+
+    // Context for bearing fallback
+    const prevCoord = i > 0 ? (steps[i - 1].coordinates || []).slice(-1)[0] : segCoords[0];
+    const thisCoord = segCoords[0];
+    const nextCoord = segCoords.length > 1 ? segCoords[1] : segCoords[segCoords.length - 1];
+
+    const isLast = i === rawSteps.length - 1;
+
+    const bucket = isLast
+      ? 'arrive'
+      : bucketFromManeuver({
+          type: s.type,
+          instructionText: s.instruction,
+          prevCoord,
+          thisCoord,
+          nextCoord,
+        });
+
+    const distance = typeof s.distance === 'number' ? s.distance : 0;
+
+    // Prefer the provider's human instruction text; otherwise bucket fallback.
+    let spokenCue = '';
+    if (s.instruction && String(s.instruction).trim().length) {
+      spokenCue = String(s.instruction).trim();
+      if (isLast && !/arriv|destination|reached|you have/i.test(spokenCue)) {
+        spokenCue = `${spokenCue}. You have arrived`;
+      }
+    } else {
+      spokenCue = bucketToGenericSpoken(bucket);
+    }
+
+    steps.push({
+      index: i,
+      instructionBucket: bucket,
+      spokenCue,
+      hapticKey: bucketToHapticKey(bucket),
+      distanceMeters: distance,
+      coordinates: segCoords,
+    });
+  }
+
+  // Summary
+  const totalDistance = feature?.properties?.summary?.distance ?? 0;
+  const totalDuration = feature?.properties?.summary?.duration ?? 0;
+  const summaryDistance = formatDistance(totalDistance);
+  const summaryDuration = formatDuration(totalDuration);
+
+  return { steps, summaryDistance, summaryDuration };
+}
+
+// -----------------------------
+// OSRM normalizer
+// -----------------------------
+
+function normalizeOsrm(data) {
+  if (!data || !data.routes || !data.routes.length) return null;
+  const route = data.routes[0];
+  const legs = route.legs || [];
+  if (!legs.length) return null;
+  const leg = legs[0];
+  const rawSteps = leg.steps || [];
+
+  // OSRM provides per-step geometry; we keep each step's own coordinates.
+  const steps = [];
+  for (let i = 0; i < rawSteps.length; i++) {
+    const s = rawSteps[i];
+    const segCoords = (s.geometry && s.geometry.coordinates) || [];
+    if (!segCoords.length) {
+      // No geometry; synthesize an empty slice so downstream never crashes.
+      // (Rare; just guard.)
+    }
+    const prevCoord = i > 0 ? (steps[i - 1].coordinates || []).slice(-1)[0] : segCoords[0];
+    const thisCoord = segCoords[0];
+    const nextCoord = segCoords.length > 1 ? segCoords[1] : segCoords[segCoords.length - 1];
+
+    const isLast = i === rawSteps.length - 1;
+    const maneuver = s.maneuver || {};
+    const bucket = isLast && maneuver.type === 'arrive'
+      ? 'arrive'
+      : bucketFromManeuver({
+          type: maneuver.type,
+          modifier: maneuver.modifier,
+          prevCoord,
+          thisCoord,
+          nextCoord,
+        });
+
+    const distance = typeof s.distance === 'number' ? s.distance : 0;
+    let spokenCue = '';
+
+    // OSRM step.name is the street name; build a sensible sentence.
+    const name = cleanName(s.name);
+    if (maneuver.type === 'arrive' || isLast) {
+      spokenCue = name ? `Arriving at ${name}` : 'You have arrived';
+    } else if (maneuver.type === 'depart') {
+      spokenCue = name ? `Head toward ${name}` : 'Continue straight';
+    } else if (maneuver.type === 'turn' || maneuver.type === 'new name' || maneuver.type === 'merge' || maneuver.type === 'on ramp' || maneuver.type === 'off ramp' || maneuver.type === 'end of road' || maneuver.type === 'continue') {
+      const dir = (maneuver.modifier || '').replace('slight ', 'slight ').replace('sharp ', 'sharp ');
+      const humanDir = dir ? `${dir} ` : '';
+      spokenCue = name
+        ? `Turn ${humanDir}onto ${name}`.replace(/\s+/g, ' ').trim()
+        : `Turn ${humanDir}`.replace(/\s+/g, ' ').trim();
+      if (!spokenCue || spokenCue === 'Turn') spokenCue = bucketToGenericSpoken(bucket);
+    } else if (maneuver.type === 'roundabout' || maneuver.type === 'rotary') {
+      spokenCue = name ? `Enter the roundabout toward ${name}` : 'Enter the roundabout';
+    } else if (maneuver.type === 'uturn') {
+      spokenCue = 'Turn around';
+    } else {
+      spokenCue = bucketToGenericSpoken(bucket);
+    }
+
+    steps.push({
+      index: i,
+      instructionBucket: bucket,
+      spokenCue,
+      hapticKey: bucketToHapticKey(bucket),
+      distanceMeters: distance,
+      coordinates: segCoords,
+    });
+  }
+
+  const summaryDistance = formatDistance(route.distance || 0);
+  const summaryDuration = formatDuration(route.duration || 0);
+
+  return { steps, summaryDistance, summaryDuration };
+}
+
+// -----------------------------
+// Formatting helpers
+// -----------------------------
+
+function formatDistance(meters) {
+  if (typeof meters !== 'number' || !isFinite(meters)) return 'unknown distance';
+  if (meters < 1000) return `${Math.round(meters / 10) * 10} meters`;
+  const km = meters / 1000;
+  if (km < 10) return `${km.toFixed(1)} kilometers`;
+  return `${Math.round(km)} kilometers`;
+}
+
+function formatDuration(seconds) {
+  if (typeof seconds !== 'number' || !isFinite(seconds)) return 'unknown time';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 1) return 'less than a minute';
+  if (minutes === 1) return 'about 1 minute';
+  if (minutes < 60) return `about ${minutes} minutes`;
+  const hours = Math.floor(minutes / 60);
+  const remMin = minutes % 60;
+  if (remMin === 0) return `about ${hours} hour${hours === 1 ? '' : 's'}`;
+  return `about ${hours} hour${hours === 1 ? '' : 's'} ${remMin} minutes`;
+}
+
+// -----------------------------
+// Step A: Geocoding
+// -----------------------------
+
+/**
+ * @returns {Promise<{lat:number, lon:number, name:string}|null>}
+ */
+async function geocodeDestination(query) {
+  if (!query || typeof query !== 'string') return null;
+  const text = query.trim();
+  if (!text) return null;
+
+  // --- 1. Geoapify ---
+  try {
+    const geoapifyKey = process.env.EXPO_PUBLIC_GEOAPIFY_API_KEY;
+    console.log('[geocode] Geoapify key present:', !!geoapifyKey);
+    if (geoapifyKey) {
+      const url =
+        'https://api.geoapify.com/v1/geocode/search?apiKey=' +
+        encodeURIComponent(geoapifyKey) +
+        '&limit=1&text=' +
+        encodeURIComponent(text);
+      const r = await fetchWithTimeout(url, {
+        headers: { Accept: 'application/json' },
+      });
+      console.log('[geocode] Geoapify response ok:', r.ok, 'status:', r.status, 'body:', JSON.stringify(r.json)?.slice(0, 300));
+      if (
+        r.ok &&
+        r.json &&
+        Array.isArray(r.json.features) &&
+        r.json.features.length
+      ) {
+        const f = r.json.features[0];
+        const lon = f?.properties?.lon;
+        const lat = f?.properties?.lat;
+        if (
+          typeof lat === 'number' &&
+          isFinite(lat) &&
+          typeof lon === 'number' &&
+          isFinite(lon)
+        ) {
+          const name =
+            f?.properties?.formatted ||
+            f?.properties?.name ||
+            f?.properties?.city ||
+            text;
+          return { lat, lon, name: String(name) };
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[geocode] Geoapify threw:', e?.message);
+    // fall through
+  }
+
+  // --- 2. Nominatim ---
+  try {
+    // Required descriptive User-Agent per Nominatim usage policy.
+    const url =
+      'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' +
+      encodeURIComponent(text);
+    const r = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          Accept: 'application/json',
+          // Nominatim REQUIRES a descriptive UA; requests without one may be rejected.
+          'User-Agent': 'VisionVoiceApp/1.0 (accessibility app)',
+        },
+      },
+      8000
+    );
+    console.log('[geocode] Nominatim response ok:', r.ok, 'status:', r.status, 'body:', JSON.stringify(r.json)?.slice(0, 300));
+    if (
+      r.ok &&
+      r.json &&
+      Array.isArray(r.json) &&
+      r.json.length
+    ) {
+      const hit = r.json[0];
+      const lat = parseFloat(hit.lat);
+      const lon = parseFloat(hit.lon);
+      if (isFinite(lat) && isFinite(lon)) {
+        const name = hit.display_name || hit.name || text;
+        return { lat, lon, name: String(name) };
+      }
+    }
+  } catch (e) {
+    console.log('[geocode] Nominatim threw:', e?.message);
+    // fall through
+  }
+
+  return null;
+}
+
+// -----------------------------
+// Step B: Routing
+// -----------------------------
+
+/**
+ * @param {{latitude:number,longitude:number}} start
+ * @param {{lat:number,lon:number,name:string}} dest
+ * @returns {Promise<{steps:RouteStep[], summaryDistance:string, summaryDuration:string, rawProvider:'ors'|'osrm'}|null>}
+ */
+async function fetchRoute(start, dest) {
+  const startLat = start.latitude;
+  const startLon = start.longitude;
+  const endLat = dest.lat;
+  const endLon = dest.lon;
+
+  // --- 1. OpenRouteService ---
+  try {
+    const orsKey = process.env.EXPO_PUBLIC_ORS_API_KEY;
+    console.log('[routing] ORS key present:', !!orsKey);
+    if (orsKey) {
+      const url =
+        'https://api.openrouteservice.org/v2/directions/foot-walking/geojson';
+      const r = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: orsKey,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            coordinates: [
+              [startLon, startLat],
+              [endLon, endLat],
+            ],
+          }),
+        },
+        8000
+      );
+      console.log('[routing] ORS response ok:', r.ok, 'status:', r.status, 'body:', JSON.stringify(r.json)?.slice(0, 300));
+      if (r.ok && r.json) {
+        const norm = normalizeOrs(r.json);
+        if (norm && norm.steps && norm.steps.length) {
+          return {
+            steps: norm.steps,
+            summaryDistance: norm.summaryDistance,
+            summaryDuration: norm.summaryDuration,
+            rawProvider: 'ors',
+          };
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[routing] ORS threw:', e?.message);
+    // fall through
+  }
+
+  // --- 2. OSRM public demo ---
+  try {
+    const url =
+      'https://router.project-osrm.org/route/v1/foot/' +
+      encodeURIComponent(startLon) +
+      ',' +
+      encodeURIComponent(startLat) +
+      ';' +
+      encodeURIComponent(endLon) +
+      ',' +
+      encodeURIComponent(endLat) +
+      '?overview=full&geometries=geojson&steps=true';
+    const r = await fetchWithTimeout(url, {
+      headers: { Accept: 'application/json' },
+    });
+    console.log('[routing] OSRM response ok:', r.ok, 'status:', r.status, 'body:', JSON.stringify(r.json)?.slice(0, 300));
+    if (r.ok && r.json) {
+      const norm = normalizeOsrm(r.json);
+      if (norm && norm.steps && norm.steps.length) {
+        return {
+          steps: norm.steps,
+          summaryDistance: norm.summaryDistance,
+          summaryDuration: norm.summaryDuration,
+          rawProvider: 'osrm',
+        };
+      }
+    }
+  } catch (e) {
+    console.log('[routing] OSRM threw:', e?.message);
+    // fall through
+  }
+
+  return null;
+}
+
+// -----------------------------
+// Public entry: fetchWalkingRoute
+// -----------------------------
+
+/**
+ * @param {string} destinationQuery
+ * @returns {Promise<RouteResult|RouteError>}
+ */
+export async function fetchWalkingRoute(destinationQuery) {
+  // Defensive: bad query type -> speakable, friendly error.
+  if (!destinationQuery || typeof destinationQuery !== 'string' || !destinationQuery.trim()) {
+    return {
+      ok: false,
+      message: 'Please tell me where you would like to go.',
+      code: 'geocode_failed',
+    };
+  }
+
+  // Lazy-import to avoid circular concerns and to keep this file's
+  // permission/position logic decoupled at module-load time.
+  let currentPosition = null;
+  try {
+    const { getCurrentPosition, requestLocationPermission } = require('./locationService');
+    const granted = await requestLocationPermission();
+    if (!granted) {
+      return {
+        ok: false,
+        message:
+          'I need location permission to guide you. Please allow location access in your settings.',
+        code: 'location_permission_denied',
+      };
+    }
+    currentPosition = await getCurrentPosition();
+  } catch (_) {
+    currentPosition = null;
+  }
+
+  if (
+    !currentPosition ||
+    typeof currentPosition.latitude !== 'number' ||
+    typeof currentPosition.longitude !== 'number'
+  ) {
+    return {
+      ok: false,
+      message: 'I could not find your current location. Please try again in a moment.',
+      code: 'location_permission_denied',
+    };
+  }
+
+  // Geocode destination.
+  let dest = null;
+  try {
+    dest = await geocodeDestination(destinationQuery);
+  } catch (_) {
+    dest = null;
+  }
+  if (!dest) {
+    return {
+      ok: false,
+      message: 'I could not find that location. Please try a different destination.',
+      code: 'geocode_failed',
+    };
+  }
+
+  // Fetch walking route.
+  let route = null;
+  try {
+    route = await fetchRoute(
+      { latitude: currentPosition.latitude, longitude: currentPosition.longitude },
+      dest
+    );
+  } catch (_) {
+    route = null;
+  }
+  if (!route) {
+    return {
+      ok: false,
+      message:
+        'I could not plan a walking route to that place. Please check your connection and try again.',
+      code: 'routing_failed',
+    };
+  }
+
+  return {
+    ok: true,
+    destinationName: dest.name || destinationQuery,
+    origin: {
+      latitude: currentPosition.latitude,
+      longitude: currentPosition.longitude,
+    },
+    steps: route.steps,
+    summaryDistance: route.summaryDistance,
+    summaryDuration: route.summaryDuration,
+    rawProvider: route.rawProvider,
+  };
+}

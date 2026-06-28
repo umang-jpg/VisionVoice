@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -6,12 +6,15 @@ import {
   StyleSheet,
   ScrollView,
   Switch,
+  Modal,
+  TextInput,
+  Alert,
 } from 'react-native';
 import * as Speech from 'expo-speech';
 import { HAPTIC_PATTERNS, playHapticPattern } from '../services/haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialIcons, Feather } from '@expo/vector-icons';
 import { getTheme, TYPOGRAPHY, getShadows } from '../constants/theme';
 
 const SPEECH_RATES = [
@@ -31,10 +34,20 @@ export default function SettingsScreen() {
     setSosEnabled,
     theme: themeMode,
     setTheme,
+    sosProfile,
+    updateSosProfile,
   } = useSettings();
   const insets = useSafeAreaInsets();
   const theme = getTheme(themeMode);
   const shadows = getShadows(theme);
+
+  const [sosModalVisible, setSosModalVisible] = useState(false);
+  const [editingContact, setEditingContact] = useState(null);
+  const [contactName, setContactName] = useState('');
+  const [contactPhone, setContactPhone] = useState('');
+  const [userName, setUserName] = useState(sosProfile?.userName || '');
+  const [userAge, setUserAge] = useState(sosProfile?.age?.toString() || '');
+  const [userBloodGroup, setUserBloodGroup] = useState(sosProfile?.bloodGroup || '');
 
   const testPattern = (key) => {
     const pattern = HAPTIC_PATTERNS[key];
@@ -42,6 +55,69 @@ export default function SettingsScreen() {
     if (hapticEnabled) {
       setTimeout(() => playHapticPattern(key), 1200);
     }
+  };
+
+  const handleOpenSosModal = () => {
+    if (sosProfile) {
+      setUserName(sosProfile.userName);
+      setUserAge(sosProfile.age?.toString() || '');
+      setUserBloodGroup(sosProfile.bloodGroup);
+      setEditingContact(null);
+      setContactName('');
+      setContactPhone('');
+    }
+    setSosModalVisible(true);
+  };
+
+  const handleAddContact = () => {
+    if (!contactName.trim() || !contactPhone.trim()) {
+      Alert.alert('Required', 'Please enter contact name and phone number');
+      return;
+    }
+    const updatedContacts = sosProfile?.emergencyContacts ? [...sosProfile.emergencyContacts] : [];
+    if (editingContact !== null) {
+      updatedContacts[editingContact] = { name: contactName.trim(), phone: contactPhone.trim() };
+    } else {
+      updatedContacts.push({ name: contactName.trim(), phone: contactPhone.trim() });
+    }
+    updateSosProfile({ emergencyContacts: updatedContacts });
+    Speech.speak(editingContact !== null ? 'Contact updated' : 'Contact added', { rate: speechRate });
+    setContactName('');
+    setContactPhone('');
+    setEditingContact(null);
+  };
+
+  const handleEditContact = (index) => {
+    const contact = sosProfile?.emergencyContacts?.[index];
+    if (contact) {
+      setEditingContact(index);
+      setContactName(contact.name);
+      setContactPhone(contact.phone);
+    }
+  };
+
+  const handleDeleteContact = (index) => {
+    const updatedContacts = sosProfile?.emergencyContacts?.filter((_, i) => i !== index) || [];
+    updateSosProfile({ emergencyContacts: updatedContacts });
+    Speech.speak('Contact deleted', { rate: speechRate });
+  };
+
+  const handleSaveSosProfile = () => {
+    if (!userName.trim() || !userAge.trim() || !userBloodGroup.trim()) {
+      Alert.alert('Required', 'Please fill in all profile fields');
+      return;
+    }
+    if (sosProfile?.emergencyContacts?.length === 0) {
+      Alert.alert('Required', 'Please add at least one emergency contact');
+      return;
+    }
+    updateSosProfile({
+      userName: userName.trim(),
+      age: parseInt(userAge) || 0,
+      bloodGroup: userBloodGroup.trim(),
+    });
+    Speech.speak('Emergency profile saved', { rate: speechRate });
+    setSosModalVisible(false);
   };
 
   const setSpeechRateAndAnnounce = (rate, label) => {
@@ -107,6 +183,17 @@ export default function SettingsScreen() {
               accessibilityHint="Turns accelerometer fall detection and emergency alerts on or off"
             />
           </View>
+
+          <TouchableOpacity
+            style={[styles.editSosBtn, { backgroundColor: theme.primary, borderColor: theme.border }, shadows.neo]}
+            onPress={handleOpenSosModal}
+            accessible
+            accessibilityLabel="Edit emergency profile"
+            accessibilityHint="Edit your personal info and emergency contacts"
+          >
+            <Feather name="edit-2" size={20} color={theme.onPrimary} style={{ marginRight: 8 }} />
+            <Text style={[styles.editSosBtnText, { color: theme.onPrimary }]}>EDIT EMERGENCY PROFILE</Text>
+          </TouchableOpacity>
         </View>
 
         {/* ── Haptics section ──────────────────────────────────────── */}
@@ -220,6 +307,152 @@ export default function SettingsScreen() {
         </View>
 
       </ScrollView>
+
+      {/* ── SOS Profile Modal ────────────────────────────────────────── */}
+      <Modal
+        visible={sosModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSosModalVisible(false)}
+      >
+        <ScrollView style={[styles.modalOverlay, { backgroundColor: theme.background }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.surface, borderColor: theme.border }, shadows.neo]}>
+            <Text style={[styles.modalTitle, { color: theme.onBackground }]}>EMERGENCY PROFILE</Text>
+
+            {/* Personal Info Section */}
+            <Text style={[styles.modalSectionTitle, { color: theme.onBackground }]}>PERSONAL INFO</Text>
+            
+            <View style={styles.inputGroup}>
+              <Text style={[styles.inputLabel, { color: theme.onBackground }]}>Name</Text>
+              <TextInput
+                style={[styles.input, { borderColor: theme.border, color: theme.onBackground, backgroundColor: theme.surfaceContainerLow }]}
+                placeholder="Full name"
+                placeholderTextColor={theme.semantic.neutral}
+                value={userName}
+                onChangeText={setUserName}
+                accessible
+                accessibilityLabel="Name input"
+              />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={[styles.inputLabel, { color: theme.onBackground }]}>Age</Text>
+              <TextInput
+                style={[styles.input, { borderColor: theme.border, color: theme.onBackground, backgroundColor: theme.surfaceContainerLow }]}
+                placeholder="Age"
+                placeholderTextColor={theme.semantic.neutral}
+                value={userAge}
+                onChangeText={setUserAge}
+                keyboardType="numeric"
+                accessible
+                accessibilityLabel="Age input"
+              />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={[styles.inputLabel, { color: theme.onBackground }]}>Blood Group</Text>
+              <TextInput
+                style={[styles.input, { borderColor: theme.border, color: theme.onBackground, backgroundColor: theme.surfaceContainerLow }]}
+                placeholder="Blood group (e.g. O+)"
+                placeholderTextColor={theme.semantic.neutral}
+                value={userBloodGroup}
+                onChangeText={setUserBloodGroup}
+                accessible
+                accessibilityLabel="Blood group input"
+              />
+            </View>
+
+            {/* Contacts Section */}
+            <Text style={[styles.modalSectionTitle, { color: theme.onBackground }]}>EMERGENCY CONTACTS</Text>
+
+            {sosProfile?.emergencyContacts?.map((contact, index) => (
+              <View key={index} style={[styles.contactItem, { backgroundColor: theme.surfaceContainerLow, borderColor: theme.border }, shadows.neoSm]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.contactName, { color: theme.onBackground }]}>{contact.name}</Text>
+                  <Text style={[styles.contactPhone, { color: theme.semantic.neutral }]}>{contact.phone}</Text>
+                </View>
+                <View style={styles.contactActions}>
+                  <TouchableOpacity
+                    onPress={() => handleEditContact(index)}
+                    accessible
+                    accessibilityLabel={`Edit ${contact.name}`}
+                    style={{ marginRight: 8 }}
+                  >
+                    <Feather name="edit-2" size={18} color={theme.primary} />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => handleDeleteContact(index)}
+                    accessible
+                    accessibilityLabel={`Delete ${contact.name}`}
+                  >
+                    <Feather name="trash-2" size={18} color={theme.semantic.danger} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+
+            {/* Add/Edit Contact Form */}
+            <Text style={[styles.modalSectionTitle, { color: theme.onBackground }]}>{editingContact !== null ? 'EDIT CONTACT' : 'ADD CONTACT'}</Text>
+
+            <View style={styles.inputGroup}>
+              <Text style={[styles.inputLabel, { color: theme.onBackground }]}>Contact Name</Text>
+              <TextInput
+                style={[styles.input, { borderColor: theme.border, color: theme.onBackground, backgroundColor: theme.surfaceContainerLow }]}
+                placeholder="Name"
+                placeholderTextColor={theme.semantic.neutral}
+                value={contactName}
+                onChangeText={setContactName}
+                accessible
+                accessibilityLabel="Contact name input"
+              />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={[styles.inputLabel, { color: theme.onBackground }]}>Phone Number</Text>
+              <TextInput
+                style={[styles.input, { borderColor: theme.border, color: theme.onBackground, backgroundColor: theme.surfaceContainerLow }]}
+                placeholder="Phone number"
+                placeholderTextColor={theme.semantic.neutral}
+                value={contactPhone}
+                onChangeText={setContactPhone}
+                keyboardType="phone-pad"
+                accessible
+                accessibilityLabel="Phone number input"
+              />
+            </View>
+
+            <TouchableOpacity
+              style={[styles.addContactBtn, { backgroundColor: theme.semantic.accent, borderColor: theme.border }, shadows.neo]}
+              onPress={handleAddContact}
+              accessible
+              accessibilityLabel={editingContact !== null ? 'Update contact' : 'Add contact'}
+            >
+              <Text style={[styles.addContactBtnText, { color: theme.onPrimary }]}>{editingContact !== null ? 'UPDATE CONTACT' : 'ADD CONTACT'}</Text>
+            </TouchableOpacity>
+
+            {/* Save and Cancel */}
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: theme.primary, borderColor: theme.border }, shadows.neo]}
+                onPress={handleSaveSosProfile}
+                accessible
+                accessibilityLabel="Save emergency profile"
+              >
+                <Text style={[styles.modalBtnText, { color: theme.onPrimary }]}>SAVE</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: theme.surface, borderColor: theme.border }, shadows.neo]}
+                onPress={() => setSosModalVisible(false)}
+                accessible
+                accessibilityLabel="Cancel"
+              >
+                <Text style={[styles.modalBtnText, { color: theme.onBackground }]}>CANCEL</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </ScrollView>
+      </Modal>
     </View>
   );
 }
@@ -323,5 +556,104 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'SpaceMono_700Bold',
     lineHeight: 20,
+  },
+  editSosBtn: {
+    padding: 16,
+    borderWidth: 4,
+    borderRadius: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editSosBtnText: {
+    fontSize: 16,
+    fontFamily: 'Anybody_800ExtraBold',
+  },
+  
+  // Modal styles
+  modalOverlay: {
+    paddingHorizontal: 20,
+    paddingVertical: 40,
+    backgroundColor: 'transparent',
+  },
+  modalContent: {
+    borderWidth: 4,
+    borderRadius: 0,
+    padding: 20,
+    marginBottom: 40,
+  },
+  modalTitle: {
+    fontSize: 24,
+    fontFamily: 'Anybody_800ExtraBold',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  modalSectionTitle: {
+    fontSize: 14,
+    fontFamily: 'Anybody_800ExtraBold',
+    letterSpacing: 1,
+    marginTop: 16,
+    marginBottom: 12,
+  },
+  inputGroup: {
+    marginBottom: 12,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontFamily: 'SpaceMono_700Bold',
+    marginBottom: 6,
+  },
+  input: {
+    borderWidth: 4,
+    borderRadius: 0,
+    padding: 12,
+    fontSize: 14,
+    fontFamily: 'SpaceMono_400Regular',
+  },
+  contactItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderWidth: 4,
+    marginBottom: 12,
+    borderRadius: 0,
+  },
+  contactName: {
+    fontSize: 14,
+    fontFamily: 'SpaceMono_700Bold',
+    marginBottom: 4,
+  },
+  contactPhone: {
+    fontSize: 12,
+    fontFamily: 'SpaceMono_400Regular',
+  },
+  contactActions: {
+    flexDirection: 'row',
+  },
+  addContactBtn: {
+    padding: 12,
+    borderWidth: 4,
+    borderRadius: 0,
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  addContactBtnText: {
+    fontSize: 14,
+    fontFamily: 'Anybody_800ExtraBold',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalBtn: {
+    flex: 1,
+    padding: 16,
+    borderWidth: 4,
+    borderRadius: 0,
+    alignItems: 'center',
+  },
+  modalBtnText: {
+    fontSize: 14,
+    fontFamily: 'Anybody_800ExtraBold',
   },
 });
