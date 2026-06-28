@@ -160,23 +160,14 @@ Every screen in VisionVoice is built against a fixed set of constraints, not as 
 
 ---
 
-## 🗺️ Roadmap
 
-Features explored in planning but not yet shipped in this MVP:
-- Fall detection with automatic emergency alerts (accelerometer-based, in progress)
-- Kitchen Guardian (cooking safety and doneness detection)
-- Social Turn-Taking Decoder (conversation attention detection)
-- Echolocation training mode
-- Persistent world-state memory across sessions (room-level change detection)
 
 ---
 
-## 📄 License
-
-[Add your license here — e.g. MIT]
 
 ---
 
 ## 🙏 Acknowledgments
 
 Built for HACKVERSE as an accessibility-first MVP. Powered entirely by free-tier infrastructure from Groq and OpenRouter.
+THANK YOU HACKVERSE
