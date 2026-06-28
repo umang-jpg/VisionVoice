@@ -1,4 +1,4 @@
-The BlindVision ecosystem:
+#The BlindVision ecosystem:
 
 1)physical skin sensation embedded haptic display based on the principle of micropneumatic technology.
 working principle  of our BlindVision headband :
