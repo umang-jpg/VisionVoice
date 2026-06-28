@@ -1,3 +1,31 @@
+The BlindVision ecosystem:
+
+1)physical skin sensation embedded haptic display based on the principle of micropneumatic technology.
+working principle  of our BlindVision headband :
+<img width="698" height="597" alt="image" src="https://github.com/user-attachments/assets/53f6853f-28f4-4a72-aec8-d539172c6fea" />
+
+
+<img width="200" height="400" alt="image" src="https://github.com/user-attachments/assets/2c7ddb70-779b-4d48-85ff-b6ceb9f5922b" />
+
+<img width="200" height="400" alt="image" src="https://github.com/user-attachments/assets/ccbe30f0-83b5-4dc5-8fd9-de53746409e1" />
+
+<img width="200" height="400" alt="image" src="https://github.com/user-attachments/assets/a1a29f46-7c2e-460b-8b74-c80a545a8ec5" />
+
+<img width="200" height="400" alt="image" src="https://github.com/user-attachments/assets/804743b1-a8fb-42d3-8cd9-ff95e26929b9" />
+<img width="200" height="400" alt="image" src="https://github.com/user-attachments/assets/992cb307-a95e-4b2b-87d5-bda0c228830a" />
+
+
+
+
+
+
+
+
+
+
+
+
+
 # 👁️ VisionVoice
 
 **An AI-powered, fully voice-controlled accessibility app for blind and low-vision users.**
@@ -11,6 +39,22 @@ Built as a hackathon MVP. 100% free-tier AI infrastructure. No paid APIs, no sub
 ## ✨ Core Idea
 
 > Every other app tells a blind user what it sees. VisionVoice is controlled entirely by voice — one button, every screen, zero screen-time required to operate it.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ---
 
