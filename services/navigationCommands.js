@@ -177,3 +177,16 @@ export function matchLearnRecordCommand(cleanText) {
   ];
   return phrases.some(p => cleanText === p || cleanText.includes(p));
 }
+
+/**
+ * Matches commands to call a volunteer or trusted friend for everyday help.
+ */
+export function matchVolunteerCallCommand(cleanText) {
+  if (!cleanText) return false;
+  const phrases = [
+    'call friend',
+    'call volunteer',
+    'call for help',
+  ];
+  return phrases.some(p => cleanText === p || cleanText.includes(p));
+}

@@ -10,6 +10,7 @@ export function SettingsProvider({ children }) {
   const [speechRate, setSpeechRate] = useState(0.9);
   const [sosEnabled, setSosEnabled] = useState(true);
   const [theme, setTheme] = useState('dark');
+  const [volunteerNumber, setVolunteerNumber] = useState('');
   const [sosProfile, setSosProfile] = useState(null);
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -24,6 +25,7 @@ export function SettingsProvider({ children }) {
           if (parsed.speechRate !== undefined) setSpeechRate(parsed.speechRate);
           if (parsed.sosEnabled !== undefined) setSosEnabled(parsed.sosEnabled);
           if (parsed.theme !== undefined) setTheme(parsed.theme);
+          if (parsed.volunteerNumber !== undefined) setVolunteerNumber(parsed.volunteerNumber);
         }
         
         // Load SOS profile
@@ -37,7 +39,7 @@ export function SettingsProvider({ children }) {
   }, []);
 
   const saveSettings = (newSettings) => {
-    const current = { hapticEnabled, speechRate, sosEnabled, theme, ...newSettings };
+    const current = { hapticEnabled, speechRate, sosEnabled, theme, volunteerNumber, ...newSettings };
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(current));
   };
 
@@ -45,6 +47,7 @@ export function SettingsProvider({ children }) {
   const updateSpeechRate = (val) => { setSpeechRate(val); saveSettings({ speechRate: val }); };
   const updateSos = (val) => { setSosEnabled(val); saveSettings({ sosEnabled: val }); };
   const updateTheme = (val) => { setTheme(val); saveSettings({ theme: val }); };
+  const updateVolunteerNumber = (val) => { setVolunteerNumber(val); saveSettings({ volunteerNumber: val }); };
   
   const updateSosProfile = async (updates) => {
     const updated = await updateSosConfigService(updates);
@@ -62,6 +65,8 @@ export function SettingsProvider({ children }) {
         setSosEnabled: updateSos,
         theme,
         setTheme: updateTheme,
+        volunteerNumber,
+        setVolunteerNumber: updateVolunteerNumber,
         sosProfile,
         updateSosProfile,
       }}

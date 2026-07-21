@@ -15,7 +15,9 @@ import {
   matchBrailleExportCommand,
   matchLearnSearchCommand,
   matchLearnRecordCommand,
+  matchVolunteerCallCommand,
 } from '../services/navigationCommands';
+import { callVolunteer } from '../services/volunteerCall';
 
 const VoiceContext = createContext();
 
@@ -28,7 +30,7 @@ export function VoiceProvider({ children }) {
 
   // expo-audio hook — stable recorder instance for the lifetime of the provider
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const { hapticEnabled, speechRate } = useSettings();
+  const { hapticEnabled, speechRate, volunteerNumber } = useSettings();
 
   useEffect(() => {
     AudioModule.requestRecordingPermissionsAsync();
@@ -150,6 +152,9 @@ export function VoiceProvider({ children }) {
       } else if (matchLearnRecordCommand(cleanText)) {
         speak('Starting new note');
         navigate('Learn', { voiceModeKey: 'record' });
+      } else if (matchVolunteerCallCommand(cleanText)) {
+        await callVolunteer(volunteerNumber);
+        if (hapticEnabled) playHapticPattern('stop');
       } else {
         const currentRoute = navigationRef.isReady() ? navigationRef.getCurrentRoute()?.name : null;
         if (currentRoute === 'Memory' || currentRoute === 'Learn') {

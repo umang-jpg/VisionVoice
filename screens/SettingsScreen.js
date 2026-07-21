@@ -34,6 +34,8 @@ export default function SettingsScreen() {
     setSosEnabled,
     theme: themeMode,
     setTheme,
+    volunteerNumber,
+    setVolunteerNumber,
     sosProfile,
     updateSosProfile,
   } = useSettings();
@@ -42,6 +44,7 @@ export default function SettingsScreen() {
   const shadows = getShadows(theme);
 
   const [sosModalVisible, setSosModalVisible] = useState(false);
+  const [volunteerPhoneInput, setVolunteerPhoneInput] = useState(volunteerNumber);
   const [editingContact, setEditingContact] = useState(null);
   const [contactName, setContactName] = useState('');
   const [contactPhone, setContactPhone] = useState('');
@@ -67,6 +70,11 @@ export default function SettingsScreen() {
       setContactPhone('');
     }
     setSosModalVisible(true);
+  };
+
+  const handleSaveVolunteerNumber = () => {
+    setVolunteerNumber(volunteerPhoneInput);
+    Speech.speak('Volunteer number saved', { rate: speechRate });
   };
 
   const handleAddContact = () => {
@@ -194,6 +202,33 @@ export default function SettingsScreen() {
             <Feather name="edit-2" size={20} color={theme.onPrimary} style={{ marginRight: 8 }} />
             <Text style={[styles.editSosBtnText, { color: theme.onPrimary }]}>EDIT EMERGENCY PROFILE</Text>
           </TouchableOpacity>
+        </View>
+
+        {/* ── Volunteer Assistance section ──────────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: theme.onBackground }]}>VOLUNTEER ASSISTANCE</Text>
+
+          <View style={[styles.rowBox, { backgroundColor: theme.surfaceContainerLow, borderColor: theme.border }, shadows.neoSm]}>
+            <TextInput
+              style={[
+                { 
+                  flex: 1,
+                  color: theme.onBackground,
+                  fontFamily: 'SpaceMono_700Bold',
+                  fontSize: 16,
+                },
+              ]}
+              placeholder="Add a volunteer's number"
+              placeholderTextColor={theme.semantic.neutral}
+              value={volunteerPhoneInput}
+              onChangeText={setVolunteerPhoneInput}
+              onBlur={handleSaveVolunteerNumber}
+              keyboardType="phone-pad"
+              accessible
+              accessibilityLabel="Volunteer assistance phone number"
+              accessibilityHint="Enter the phone number of a trusted volunteer or friend to call for everyday help"
+            />
+          </View>
         </View>
 
         {/* ── Haptics section ──────────────────────────────────────── */}
